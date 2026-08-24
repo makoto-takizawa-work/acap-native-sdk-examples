@@ -1,3 +1,8 @@
 #!/bin/sh
 PROCESS_ID=$(pidof shell_script_example)
 logger -t "shell_script_example[$PROCESS_ID]" -p INFO "Hello World!"
+
+ARC=$(uname -m)
+echo "Architecture: $ARC"
+OUT=$(/usr/local/packages/shell_script_example/hello_world_${ARC})
+echo $OUT

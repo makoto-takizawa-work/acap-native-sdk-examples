@@ -4,7 +4,8 @@
         "setup": {
             "appName": "shell_script_example",
             "vendor": "Axis Communications",
-            "vendorId": "1234567890",
+            "vendorId": "6f16357ced",
+            "appId": "412599",
             "runMode": "never",
             "version": "1.0.0",
             "compatibleOsVersions": [

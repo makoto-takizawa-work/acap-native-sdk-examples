@@ -4,7 +4,8 @@
         "setup": {
             "appName": "hello_world",
             "vendor": "Axis Communications",
-            "vendorId": "1234567890",
+            "appId": "412599",
+            "vendorId": "6f16357ced",
             "version": "1.0.0",
             "compatibleOsVersions": [
                 {

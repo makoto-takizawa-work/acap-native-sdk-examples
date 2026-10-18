@@ -1,418 +1,184 @@
 *Copyright (C) 2021, Axis Communications AB, Lund, Sweden. All Rights Reserved.*
 
-# A vdo stream based ACAP application on an edge device
+# vdostream — VDO によるフレーム取得と larod 前処理（クロップ・色変換）
 
-This README file explains how to build an ACAP application that uses:
+## 概要
 
-- the [Video capture API (VDO)](https://developer.axis.com/acap/api/native-sdk-api/#video-capture-api-vdo) to fetch frames from e.g. a camera.
+`vdoencodeclient` は [Video capture API (VDO)](https://developer.axis.com/acap/api/native-sdk-api/#video-capture-api-vdo)
+でカメラからフレームを取得し、ファイル（または標準出力）へ書き出す ACAP アプリケーションです。
 
-Together with this README file, you should be able to find a directory called app. That directory contains the "vdoencodeclient" application source code which can easily
-be compiled and run with the help of the tools and step by step below.
+- VDO から av1 / avif / h264 / h265 / jpeg / nv12 / rgb / y800 の各形式でフレームを取得できます。
+- ストリームの解像度を引数（`--width` / `--height`）で指定できます。
+- `nv12` / `rgb` のフレームは、[larod](https://developer.axis.com/acap/api/native-sdk-api/#machine-learning-api-larod)
+  の前処理（pre-processing）ジョブを通して、**指定領域のクロップ** と **出力形式の変換** ができます。
+  前処理デバイスは `cpu-proc`（libyuv）と `a9-gpu-proc`（OpenCL）から選べます。
 
-This example illustrates two different ways of retrieving video frames from VDO.
+前処理は `--crop` または `--output-format` を指定したときだけ有効になります。どちらも指定しなければ、
+VDO から受け取ったフレームをそのまま書き出す従来の動作です。
 
-- Snapshot, if only one video frame is wanted the vdo_stream_snapshot API is convenient. Typically used for JPEG or AVIF.
-- Continously capturing video frame from the VDO service.
+処理の流れ（前処理あり）:
 
-When a video buffer is retrieved, access the received buffer contents as well as the frame metadata. Captured frames are logged in the Application log.
+```text
+VDO (nv12 / rgb, W×H) ──► larod 前処理ジョブ ──► 出力ファイル
+                           image.input.crop = X,Y,CW,CH
+                           出力 = CW×CH, --output-format
+```
 
-## Getting started
+## ファイル構成
 
-These instructions will guide you on how to execute the code. Below is the structure and scripts used in the example:
-
-```sh
+```text
 vdostream
 ├── app
 │   ├── LICENSE
-│   ├── Makefile
-│   ├── manifest.json.avif
-│   ├── manifest.json.av1
-│   ├── manifest.json.h264
-│   ├── manifest.json.h265
-│   ├── manifest.json.jpeg
-│   ├── manifest.json.nv12
-│   ├── manifest.json.rgb
-│   ├── manifest.json.y800
-│   └── panic.c
-│   └── panic.h
-│   └── vdoencodeclient.c
-├── Dockerfile
+│   ├── Makefile             アプリのコンパイル（vdostream, liblarod をリンク）
+│   ├── manifest.json.<fmt>  起動時の既定フォーマットごとの manifest（av1, avif, h264, h265, jpeg, nv12, rgb, y800）
+│   ├── panic.c / panic.h    エラー時に syslog へ出力して終了
+│   ├── preprocess.c / .h    larod 前処理（クロップ・色変換・処理時間計測）
+│   └── vdoencodeclient.c    main（引数解析、VDO ストリーム、フレーム書き出し）
+├── Dockerfile               マルチステージビルド（builder → export）
+├── Makefile                 Docker ビルドを実行し build/ に .eap を出力
 └── README.md
 ```
 
-- **app/LICENSE** - Text file which lists all open source licensed source code distributed with the application.
-- **app/Makefile** - Build and link instructions for the application.
-- **app/manifest.json** - Defines the application and its configuration.
-- **app/panic.c/h** - Utility for exiting the program on error
-- **app/vdoencodeclient.c** - Application to capture the frames using vdo service in C.
-- **Dockerfile** - Assembles an image containing the ACAP Native SDK and builds the application using it.
-- **README.md** - Step by step instructions on how to run the example.
+## 使用方法
 
-### Limitations
+### ビルド
 
-- Supported video compression formats for an Axis video device are found in the
-  data-sheet of the device.
+```sh
+make build                                  # aarch64, manifest.json.h264
+make VDO_FORMAT=rgb build                   # manifest.json.rgb を使用
+make ARCH=armv7hf VDO_FORMAT=nv12 build     # armv7hf 向け
+make clean                                  # build/ を削除
+```
 
-### How to run the code
+| 変数 | 既定値 | 内容 |
+|---|---|---|
+| `ARCH` | `aarch64` | `aarch64` または `armv7hf` |
+| `VERSION` | `12.11.0` | ACAP Native SDK のバージョン |
+| `VDO_FORMAT` | `h264` | 使用する `app/manifest.json.<VDO_FORMAT>`（Web UI から起動したときの `runOptions` が変わる） |
 
-Below is the step by step instructions on how to execute the program. So basically starting with the generation of the .eap file to running it on a device:
-
-#### Build the application
-
-Standing in your working directory run the following commands:
+成果物は `build/vdoencodeclient_<VDO_FORMAT>_1_0_0_<ARCH>.eap` です。どの manifest でもバイナリは同じで、
+引数を変えればすべての機能を使えます。
 
 > [!NOTE]
->
-> Depending on the network your local build machine is connected to, you may need to add proxy
-> settings for Docker. See
-> [Proxy in build time](https://developer.axis.com/acap/develop/proxy/#proxy-in-build-time).
+> Apple Silicon の Mac では `InvalidBaseImagePlatform` の警告が出ますが、SDK イメージが amd64 専用で
+> エミュレーション実行されるためで、生成されるバイナリは正しい aarch64 です。
+
+### インストールと起動
+
+1. デバイスの Web UI（`http://<AXIS_DEVICE_IP>/index.html#apps`）で **Allow unsigned apps** を有効にし、
+   `.eap` をアップロードしてインストールします。
+2. manifest の `runMode` は `never` なので、自動では起動しません。Web UI の **Start** で、manifest の
+   `runOptions`（例: `--format rgb --frames 25`）で一度だけ実行されます。
+3. 任意の引数で実行する場合は、デバイスに SSH でログインしてインストール先のバイナリを直接実行します。
 
 ```sh
-docker build --platform=linux/amd64 --tag <APP_IMAGE> --build-arg VDO_FORMAT=<VDO_FORMAT> .
+/usr/local/packages/vdoencodeclient/vdoencodeclient --format nv12 --frames 10 \
+    -W 1280 -H 720 --crop 400,200,320,240 --output /tmp/crop.rgb
 ```
 
-<!-- textlint-disable terminology -->
-<VDO_FORMAT> is the video compression format. Supported values are *av1*, *avif*, *h264*, *h265*, *jpeg*, *nv12*, *rgb* and *y800*
-<!-- textlint-enable -->
+ログは `http://<AXIS_DEVICE_IP>/axis-cgi/admin/systemlog.cgi?appname=vdoencodeclient` で確認できます。
 
-<APP_IMAGE> is the name to tag the image with, e.g., vdoencodeclient:1.0
+### 引数
 
-Default architecture is **armv7hf**. To build for **aarch64** it's possible to
-update the *ARCH* variable in the Dockerfile or to set it in the `docker build`
-command via build argument:
+| 引数 | 短縮形 | 既定値 | 内容 |
+|---|---|---|---|
+| `--format` | `-t` | `h264` | VDO の形式: av1, avif, h264, h265, jpeg, nv12, rgb, y800 |
+| `--frames` | `-n` | 無制限 | 取得するフレーム数（Ctrl-C で中断） |
+| `--output` | `-o` | `/dev/null` | 出力ファイル。`/dev/stdout` も可 |
+| `--width` | `-W` | `640` | ストリームの幅 |
+| `--height` | `-H` | `360` | ストリームの高さ |
+| `--crop` | `-c` | なし | クロップ領域 `X,Y,W,H`（前処理を有効化） |
+| `--output-format` | `-f` | `rgb-interleaved` | 前処理の出力形式: rgb-interleaved, rgb-planar, nv12（前処理を有効化） |
+| `--pp-device` | `-d` | `cpu-proc` | 前処理デバイス: cpu-proc, a9-gpu-proc |
 
-```sh
-docker build --platform=linux/amd64 --build-arg ARCH=aarch64 --build-arg VDO_FORMAT=<VDO_FORMAT> --tag <APP_IMAGE> .
+前処理に関する決まり:
+
+- `--format` は `nv12` か `rgb` である必要があります（それ以外はエラー終了）。
+- 出力サイズはクロップサイズ（`--crop` がなければストリームサイズ）で、スケーリングはしません。
+- クロップ領域はフレーム内に収まり、4 値とも偶数である必要があります（libyuv と nv12 の制約）。
+- 前処理が有効なときは `--frames 1` でもスナップショット API ではなくストリームから取得します。
+- 終了時に、前処理ジョブ（`larodRunJob()`）の処理時間の統計をログに出力します。
+
+```text
+Preprocessing on cpu-proc: nv12 1280x720 -> crop 400,200,320,240 -> rgb-interleaved 320x240 (230400 bytes)
+...
+Preprocessing time on cpu-proc: first 7.95 ms, then avg 5.45 ms, min 5.35 ms, max 5.83 ms over 99 jobs
 ```
 
-Copy the result from the container image to a local directory build:
+### デバイスごとの対応組み合わせ
+
+AXIS Q1728（ARTPEC-9）で実際に動かして確認した結果です。
+
+| 入力 → 出力 | cpu-proc | a9-gpu-proc |
+|---|---|---|
+| nv12 → rgb-interleaved（クロップあり・なし） | ✔ | ✔ |
+| nv12 → nv12（クロップ） | ✔ | ✔ |
+| nv12 → rgb-planar（クロップ） | ✔ | ✘ `This backend only supports color conversion from NV12 to RGB interleaved` |
+| rgb → rgb-interleaved（クロップ） | ✔ | ✘ `Crop-scale for the specified format is not supported by OpenCL backend` |
+
+非対応の組み合わせは最初のジョブ実行時に larod がエラーを返し、メッセージを syslog に出して終了します。
+
+### 出力の確認
+
+出力はヘッダーのない raw 画像の連続です。ホストで `ffmpeg` を使って画像に変換できます（例: 320x240）。
 
 ```sh
-docker cp $(docker create --platform=linux/amd64 <APP_IMAGE>):/opt/app ./build
+ffmpeg -f rawvideo -pix_fmt rgb24 -s 320x240 -i crop.rgb -frames:v 1 crop.png   # rgb-interleaved
+ffmpeg -f rawvideo -pix_fmt nv12  -s 320x240 -i crop.nv12 -frames:v 1 crop.png   # nv12
 ```
 
-The working dir now contains a build folder with the following files:
+`rgb-planar` は R, G, B の順のプレーンです。`ffmpeg` の `gbrp` は G, B, R の順なので、プレーンを並べ替えてから
+変換してください。
+
+## cpu-proc と a9-gpu-proc の処理速度比較
+
+### 測定条件
+
+- デバイス: AXIS Q1728（ARTPEC-9）、ACAP Native SDK 12.11.0（aarch64）
+- 入力: VDO nv12 ストリーム（30 fps）
+- 測定対象: 1 フレームあたりの `larodRunJob()`（ブロッキング）の所要時間。テンソル登録などの初回コストを
+  含む 1 ジョブ目は除き、続く 99 ジョブの平均を求めました。
+- 各条件 3 回実行した平均の平均です（条件 A の cpu-proc は SSH 接続エラーの 1 回を除いた 2 回）。
+  1 回ごとの平均のばらつきは ±0.3 ms 以内でした。
+- 出力は `/dev/null`（ファイル書き出しのコストは含みません）。
+
+### 結果
+
+| # | ストリーム | 処理 | 出力 | cpu-proc 平均 [ms] | a9-gpu-proc 平均 [ms] | GPU / CPU |
+|---|---|---|---|---:|---:|---:|
+| B | 1920x1080 | クロップ 320x240 | rgb-interleaved | **1.48** | 3.51 | 2.4 倍 |
+| F | 1920x1080 | クロップ 640x640 | nv12 | **3.03** | 11.07 | 3.7 倍 |
+| A | 1920x1080 | クロップ 640x640 | rgb-interleaved | **5.45** | 7.95 | 1.5 倍 |
+| E | 3840x2160 | クロップ 640x640 | rgb-interleaved | **5.98** | 12.78 | 2.1 倍 |
+| G | 1280x720 | 全体を変換 | rgb-interleaved | **3.77** | 4.32 | 1.1 倍 |
+| C | 1920x1080 | 全体を変換 | rgb-interleaved | **7.84** | 9.19 | 1.2 倍 |
+| D | 3840x2160 | 全体を変換 | rgb-interleaved | **28.74** | 46.51 | 1.6 倍 |
+
+初回ジョブ（参考）は、cpu-proc が 2〜72 ms、a9-gpu-proc が 4〜98 ms でした（条件 D が最大）。
+
+### 考察
+
+- **すべての条件で cpu-proc のほうが速い** 結果でした。全体を変換する条件（C, G）では差が 1.1〜1.2 倍と小さく、
+  小さな領域をクロップする条件（B, E, F）では 2〜3.7 倍の差がつきました。
+- cpu-proc のクロップの所要時間はほぼ **出力サイズ** で決まります（A: 1080p から 5.45 ms、E: 4K から 5.98 ms）。
+  a9-gpu-proc は **入力サイズ** にも比例して増えます（A: 7.95 ms → E: 12.78 ms）。GPU 側はクロップ領域だけでなく
+  入力バッファ全体を扱うコストがかかっていると考えられます。
+- a9-gpu-proc の nv12 → nv12 クロップ（F）は、rgb への変換を含む A よりも遅くなりました。
+- 今回測ったのは 1 ジョブの所要時間（レイテンシ）だけで、CPU 使用率は測っていません。a9-gpu-proc には、変換処理を
+  CPU から逃がせる利点があります。推論など他の CPU 負荷と並行して動かす場合は、システム全体の負荷も含めて
+  評価してください。
+
+### 再現方法
+
+デバイスで以下を実行し、ログの `Preprocessing time on ...` 行を確認します。
 
 ```sh
-vdostream
-├── app
-│   ├── LICENSE
-│   ├── Makefile
-│   ├── manifest.json.av1
-│   ├── manifest.json.avif
-│   ├── manifest.json.h264
-│   ├── manifest.json.h265
-│   ├── manifest.json.jpeg
-│   ├── manifest.json.nv12
-│   ├── manifest.json.rgb
-│   ├── manifest.json.y800
-│   └── panic.c
-│   └── panic.h
-│   └── vdoencodeclient.c
-├── build
-│   ├── LICENSE
-│   ├── Makefile
-│   ├── manifest.json
-│   ├── manifest.json.av1
-│   ├── manifest.json.avif
-│   ├── manifest.json.h264
-│   ├── manifest.json.h265
-│   ├── manifest.json.jpeg
-│   ├── manifest.json.nv12
-│   ├── manifest.json.rgb
-│   ├── manifest.json.y800
-│   ├── package.conf
-│   ├── package.conf.orig
-│   ├── param.conf
-│   ├── vdoencodeclient*
-│   ├── vdoencodeclient_1_0_0_armv7hf.eap
-│   ├── vdoencodeclient_1_0_0_LICENSE.txt
-│   └── vdoencodeclient.c
-├── Dockerfile
-└── README.md
-```
-
-- **build/manifest.json** - Defines the application and its configuration.
-- **build/package.conf** - Defines the application and its configuration.
-- **build/package.conf.orig** - Defines the application and its configuration, original file.
-- **build/param.conf** - File containing application parameters.
-- **build/vdoencodeclient*** - Application executable binary file.
-- **build/vdoencodeclient_1_0_0_armv7hf.eap** - Application package .eap file.
-- **build/vdoencodeclient_1_0_0_LICENSE.txt** - Copy of LICENSE file.
-
-> [!NOTE]
->
-> For detailed information on how to build, install, and run ACAP applications, refer to the official ACAP documentation: [Build, install, and run](https://developer.axis.com/acap/develop/build-install-run/).
-
-#### Install and start the application
-
-Browse to the application page of the Axis device:
-
-```sh
-http://<AXIS_DEVICE_IP>/index.html#apps
-```
-
-1. Click on the tab **Apps** in the device GUI
-2. Enable **Allow unsigned apps** toggle
-3. Click **(+ Add app)** button to upload the application file
-4. Select the newly built application package, depending on architecture:
-
-    - `vdoencodeclient_1_0_0_aarch64.eap`
-    - `vdoencodeclient_1_0_0_armv7hf.eap`
-
-5. Click **Install**
-6. Run the application by enabling the **Start** switch
-
-#### The expected output
-
-Application log can be found directly at:
-
-```sh
-http://<AXIS_DEVICE_IP>/axis-cgi/admin/systemlog.cgi?appname=vdoencodeclient
-```
-
-#### Output - format av1
-
-```sh
------ Contents of SYSTEM_LOG for 'vdoencodeclient' -----
-
-vdoencodeclient[37322]: Starting stream: av1, 640x360, 30 fps
-vdoencodeclient[37322]: frame =    0, type = I, size = 4109
-vdoencodeclient[37322]: frame =    1, type = P, size = 63
-vdoencodeclient[37322]: frame =    2, type = P, size = 63
-vdoencodeclient[37322]: frame =    3, type = P, size = 63
-vdoencodeclient[37322]: frame =    4, type = P, size = 63
-vdoencodeclient[37322]: frame =    5, type = P, size = 63
-vdoencodeclient[37322]: frame =    6, type = P, size = 63
-vdoencodeclient[37322]: frame =    7, type = P, size = 63
-vdoencodeclient[37322]: frame =    8, type = P, size = 63
-vdoencodeclient[37322]: frame =    9, type = P, size = 63
-vdoencodeclient[37322]: frame =   10, type = P, size = 63
-vdoencodeclient[37322]: frame =   11, type = P, size = 63
-vdoencodeclient[37322]: frame =   12, type = P, size = 67
-vdoencodeclient[37322]: frame =   13, type = P, size = 64
-vdoencodeclient[37322]: frame =   14, type = P, size = 64
-vdoencodeclient[37322]: frame =   15, type = P, size = 64
-vdoencodeclient[37322]: frame =   16, type = P, size = 64
-vdoencodeclient[37322]: frame =   17, type = P, size = 63
-vdoencodeclient[37322]: frame =   18, type = P, size = 63
-vdoencodeclient[37322]: frame =   19, type = P, size = 63
-vdoencodeclient[37322]: frame =   20, type = P, size = 63
-vdoencodeclient[37322]: frame =   21, type = P, size = 63
-vdoencodeclient[37322]: frame =   22, type = P, size = 63
-vdoencodeclient[37322]: frame =   23, type = P, size = 63
-vdoencodeclient[37322]: frame =   24, type = P, size = 63
-```
-
-#### Output - format avif
-
-```sh
------ Contents of SYSTEM_LOG for 'vdoencodeclient' -----
-
-vdoencodeclient[49013]: Starting stream: avif, 640x360
-vdoencodeclient[49013]: frame =    0, type = avif, size = 2700
-```
-
-#### Output - format h264
-
-```sh
------ Contents of SYSTEM_LOG for 'vdoencodeclient' -----
-
-vdoencodeclient[49013]: Starting stream: h264, 640x360, 30 fps
-vdoencodeclient[49013]: frame =    0, type = I, size = 2700
-vdoencodeclient[49013]: frame =    1, type = P, size = 19
-vdoencodeclient[49013]: frame =    2, type = P, size = 19
-vdoencodeclient[49013]: frame =    3, type = P, size = 19
-vdoencodeclient[49013]: frame =    4, type = P, size = 19
-vdoencodeclient[49013]: frame =    5, type = P, size = 19
-vdoencodeclient[49013]: frame =    6, type = P, size = 19
-vdoencodeclient[49013]: frame =    7, type = P, size = 19
-vdoencodeclient[49013]: frame =    8, type = P, size = 19
-vdoencodeclient[49013]: frame =    9, type = P, size = 19
-vdoencodeclient[49013]: frame =   10, type = P, size = 19
-vdoencodeclient[49013]: frame =   11, type = P, size = 19
-vdoencodeclient[49013]: frame =   12, type = P, size = 19
-vdoencodeclient[49013]: frame =   13, type = P, size = 19
-vdoencodeclient[49013]: frame =   14, type = P, size = 19
-vdoencodeclient[49013]: frame =   15, type = P, size = 19
-vdoencodeclient[49013]: frame =   16, type = P, size = 19
-vdoencodeclient[49013]: frame =   17, type = P, size = 19
-vdoencodeclient[49013]: frame =   18, type = P, size = 19
-vdoencodeclient[49013]: frame =   19, type = P, size = 19
-vdoencodeclient[49013]: frame =   20, type = P, size = 19
-vdoencodeclient[49013]: frame =   21, type = P, size = 19
-vdoencodeclient[49013]: frame =   22, type = P, size = 19
-vdoencodeclient[49013]: frame =   23, type = P, size = 19
-vdoencodeclient[49013]: frame =   24, type = P, size = 19
-```
-
-#### Output - format h265
-
-```sh
------ Contents of SYSTEM_LOG for 'vdoencodeclient' -----
-
-vdoencodeclient[29828]: Starting stream: h265, 640x360, 30 fps
-vdoencodeclient[29828]: frame =    0, type = I, size = 1404
-vdoencodeclient[29828]: frame =    1, type = P, size = 30
-vdoencodeclient[29828]: frame =    2, type = P, size = 31
-vdoencodeclient[29828]: frame =    3, type = P, size = 30
-vdoencodeclient[29828]: frame =    4, type = P, size = 33
-vdoencodeclient[29828]: frame =    5, type = P, size = 43
-vdoencodeclient[29828]: frame =    6, type = P, size = 42
-vdoencodeclient[29828]: frame =    7, type = P, size = 37
-vdoencodeclient[29828]: frame =    8, type = P, size = 40
-vdoencodeclient[29828]: frame =    9, type = P, size = 33
-vdoencodeclient[29828]: frame =   10, type = P, size = 33
-vdoencodeclient[29828]: frame =   11, type = P, size = 33
-vdoencodeclient[29828]: frame =   12, type = P, size = 39
-vdoencodeclient[29828]: frame =   13, type = P, size = 65
-vdoencodeclient[29828]: frame =   14, type = P, size = 104
-vdoencodeclient[29828]: frame =   15, type = P, size = 36
-vdoencodeclient[29828]: frame =   16, type = P, size = 168
-vdoencodeclient[29828]: frame =   17, type = P, size = 39
-vdoencodeclient[29828]: frame =   18, type = P, size = 30
-vdoencodeclient[29828]: frame =   19, type = P, size = 30
-vdoencodeclient[29828]: frame =   20, type = P, size = 30
-vdoencodeclient[29828]: frame =   21, type = P, size = 30
-vdoencodeclient[29828]: frame =   22, type = P, size = 30
-vdoencodeclient[29828]: frame =   23, type = P, size = 30
-vdoencodeclient[29828]: frame =   24, type = P, size = 30
- ```
-
-<!-- textlint-disable terminology -->
-#### Output - format jpeg
-<!-- textlint-enable -->
-
-```sh
------ Contents of SYSTEM_LOG for 'vdoencodeclient' -----
-
-vdoencodeclient[33823]: Starting stream: jpeg, 640x360, 30 fps
-vdoencodeclient[33823]: frame =    0, type = jpeg, size = 7802
-vdoencodeclient[33823]: frame =    1, type = jpeg, size = 7797
-vdoencodeclient[33823]: frame =    2, type = jpeg, size = 7807
-vdoencodeclient[33823]: frame =    3, type = jpeg, size = 7797
-vdoencodeclient[33823]: frame =    4, type = jpeg, size = 7811
-vdoencodeclient[33823]: frame =    5, type = jpeg, size = 7811
-vdoencodeclient[33823]: frame =    6, type = jpeg, size = 7815
-vdoencodeclient[33823]: frame =    7, type = jpeg, size = 7811
-vdoencodeclient[33823]: frame =    8, type = jpeg, size = 7809
-vdoencodeclient[33823]: frame =    9, type = jpeg, size = 7813
-vdoencodeclient[33823]: frame =   10, type = jpeg, size = 7812
-vdoencodeclient[33823]: frame =   11, type = jpeg, size = 7807
-vdoencodeclient[33823]: frame =   12, type = jpeg, size = 7811
-vdoencodeclient[33823]: frame =   13, type = jpeg, size = 7803
-vdoencodeclient[33823]: frame =   14, type = jpeg, size = 7807
-vdoencodeclient[33823]: frame =   15, type = jpeg, size = 7808
-vdoencodeclient[33823]: frame =   16, type = jpeg, size = 7807
-vdoencodeclient[33823]: frame =   17, type = jpeg, size = 7809
-vdoencodeclient[33823]: frame =   18, type = jpeg, size = 7803
-vdoencodeclient[33823]: frame =   19, type = jpeg, size = 7800
-vdoencodeclient[33823]: frame =   20, type = jpeg, size = 7805
-vdoencodeclient[33823]: frame =   21, type = jpeg, size = 7803
-vdoencodeclient[33823]: frame =   22, type = jpeg, size = 7809
-vdoencodeclient[33823]: frame =   23, type = jpeg, size = 7815
-vdoencodeclient[33823]: frame =   24, type = jpeg, size = 7813
-```
-
-#### Output - format nv12
-
-```sh
------ Contents of SYSTEM_LOG for 'vdoencodeclient' -----
-
-vdoencodeclient[31151]: Starting stream: nv12, 640x360, 30 fps
-vdoencodeclient[31151]: frame =    0, type = yuv, size = 345600
-vdoencodeclient[31151]: frame =    1, type = yuv, size = 345600
-vdoencodeclient[31151]: frame =    2, type = yuv, size = 345600
-vdoencodeclient[31151]: frame =    3, type = yuv, size = 345600
-vdoencodeclient[31151]: frame =    4, type = yuv, size = 345600
-vdoencodeclient[31151]: frame =    5, type = yuv, size = 345600
-vdoencodeclient[31151]: frame =    6, type = yuv, size = 345600
-vdoencodeclient[31151]: frame =    7, type = yuv, size = 345600
-vdoencodeclient[31151]: frame =    8, type = yuv, size = 345600
-vdoencodeclient[31151]: frame =    9, type = yuv, size = 345600
-vdoencodeclient[31151]: frame =   10, type = yuv, size = 345600
-vdoencodeclient[31151]: frame =   11, type = yuv, size = 345600
-vdoencodeclient[31151]: frame =   12, type = yuv, size = 345600
-vdoencodeclient[31151]: frame =   13, type = yuv, size = 345600
-vdoencodeclient[31151]: frame =   14, type = yuv, size = 345600
-vdoencodeclient[31151]: frame =   15, type = yuv, size = 345600
-vdoencodeclient[31151]: frame =   16, type = yuv, size = 345600
-vdoencodeclient[31151]: frame =   17, type = yuv, size = 345600
-vdoencodeclient[31151]: frame =   18, type = yuv, size = 345600
-vdoencodeclient[31151]: frame =   19, type = yuv, size = 345600
-vdoencodeclient[31151]: frame =   20, type = yuv, size = 345600
-vdoencodeclient[31151]: frame =   21, type = yuv, size = 345600
-vdoencodeclient[31151]: frame =   22, type = yuv, size = 345600
-vdoencodeclient[31151]: frame =   23, type = yuv, size = 345600
-vdoencodeclient[31151]: frame =   24, type = yuv, size = 345600
-```
-
-<!-- textlint-disable terminology -->
-#### Output - format rgb
-<!-- textlint-enable -->
-
-```sh
------ Contents of SYSTEM_LOG for 'vdoencodeclient' -----
-
-vdoencodeclient[31151]: Starting stream: rgb, 640x360, 30 fps
-vdoencodeclient[31151]: frame =    0, type = rgb, size = 691200
-vdoencodeclient[31151]: frame =    1, type = rgb, size = 691200
-vdoencodeclient[31151]: frame =    2, type = rgb, size = 691200
-vdoencodeclient[31151]: frame =    3, type = rgb, size = 691200
-vdoencodeclient[31151]: frame =    4, type = rgb, size = 691200
-vdoencodeclient[31151]: frame =    5, type = rgb, size = 691200
-vdoencodeclient[31151]: frame =    6, type = rgb, size = 691200
-vdoencodeclient[31151]: frame =    7, type = rgb, size = 691200
-vdoencodeclient[31151]: frame =    8, type = rgb, size = 691200
-vdoencodeclient[31151]: frame =    9, type = rgb, size = 691200
-vdoencodeclient[31151]: frame =   10, type = rgb, size = 691200
-vdoencodeclient[31151]: frame =   11, type = rgb, size = 691200
-vdoencodeclient[31151]: frame =   12, type = rgb, size = 691200
-vdoencodeclient[31151]: frame =   13, type = rgb, size = 691200
-vdoencodeclient[31151]: frame =   14, type = rgb, size = 691200
-vdoencodeclient[31151]: frame =   15, type = rgb, size = 691200
-vdoencodeclient[31151]: frame =   16, type = rgb, size = 691200
-vdoencodeclient[31151]: frame =   17, type = rgb, size = 691200
-vdoencodeclient[31151]: frame =   18, type = rgb, size = 691200
-vdoencodeclient[31151]: frame =   19, type = rgb, size = 691200
-vdoencodeclient[31151]: frame =   20, type = rgb, size = 691200
-vdoencodeclient[31151]: frame =   21, type = rgb, size = 691200
-vdoencodeclient[31151]: frame =   22, type = rgb, size = 691200
-vdoencodeclient[31151]: frame =   23, type = rgb, size = 691200
-vdoencodeclient[31151]: frame =   24, type = rgb, size = 691200
-```
-
-#### Output - format y800
-
-```sh
------ Contents of SYSTEM_LOG for 'vdoencodeclient' -----
-
-vdoencodeclient[32479]: Starting stream: y800, 640x360, 30 fps
-vdoencodeclient[32479]: frame =    0, type = yuv, size = 230400
-vdoencodeclient[32479]: frame =    1, type = yuv, size = 230400
-vdoencodeclient[32479]: frame =    2, type = yuv, size = 230400
-vdoencodeclient[32479]: frame =    3, type = yuv, size = 230400
-vdoencodeclient[32479]: frame =    4, type = yuv, size = 230400
-vdoencodeclient[32479]: frame =    5, type = yuv, size = 230400
-vdoencodeclient[32479]: frame =    6, type = yuv, size = 230400
-vdoencodeclient[32479]: frame =    7, type = yuv, size = 230400
-vdoencodeclient[32479]: frame =    8, type = yuv, size = 230400
-vdoencodeclient[32479]: frame =    9, type = yuv, size = 230400
-vdoencodeclient[32479]: frame =   10, type = yuv, size = 230400
-vdoencodeclient[32479]: frame =   11, type = yuv, size = 230400
-vdoencodeclient[32479]: frame =   12, type = yuv, size = 230400
-vdoencodeclient[32479]: frame =   13, type = yuv, size = 230400
-vdoencodeclient[32479]: frame =   14, type = yuv, size = 230400
-vdoencodeclient[32479]: frame =   15, type = yuv, size = 230400
-vdoencodeclient[32479]: frame =   16, type = yuv, size = 230400
-vdoencodeclient[32479]: frame =   17, type = yuv, size = 230400
-vdoencodeclient[32479]: frame =   18, type = yuv, size = 230400
-vdoencodeclient[32479]: frame =   19, type = yuv, size = 230400
-vdoencodeclient[32479]: frame =   20, type = yuv, size = 230400
-vdoencodeclient[32479]: frame =   21, type = yuv, size = 230400
-vdoencodeclient[32479]: frame =   22, type = yuv, size = 230400
-vdoencodeclient[32479]: frame =   23, type = yuv, size = 230400
-vdoencodeclient[32479]: frame =   24, type = yuv, size = 230400
+cd /usr/local/packages/vdoencodeclient
+./vdoencodeclient --format nv12 -W 1920 -H 1080 --crop 640,220,640,640 \
+    --frames 100 --pp-device cpu-proc --output /dev/null
+./vdoencodeclient --format nv12 -W 1920 -H 1080 --crop 640,220,640,640 \
+    --frames 100 --pp-device a9-gpu-proc --output /dev/null
 ```
 
 ## License

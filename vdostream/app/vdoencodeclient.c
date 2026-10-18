@@ -33,19 +33,40 @@
  *
  * Finally, the third argument, output, is the output filename.
  *
+ * Optionally, width and height select the stream resolution (default 640x360).
+ *
+ * With crop and/or output-format, each nv12 or rgb frame is passed through a
+ * larod pre-processing job (cpu-proc) before it is written. crop takes
+ * "x,y,width,height" and output-format one of rgb-interleaved (default),
+ * rgb-planar or nv12. The written frame has the crop size. pp-device selects
+ * the larod device, cpu-proc (default) or a9-gpu-proc.
+ *
  * Suppose that you have done through the steps of installation.
  * Then you would go to /usr/local/packages/vdoencodeclient on your device
  * and then for example run:
  *     ./vdoencodeclient \
  *         --format h264 \
  *         --frames 10 \
- *         --output vdo.out
+ *         --output vdo.out \
+ *         --width 1280 \
+ *         --height 720
  *
  * or in short argument syntax
  *      ./vdoencodeclient \
  *         -t h264 \
  *         -n 10 \
- *         -o vdo.out
+ *         -o vdo.out \
+ *         -W 1280 \
+ *         -H 720
+ *
+ * or, cropping a 320x240 region at (100,50) and converting it to planar RGB:
+ *      ./vdoencodeclient \
+ *         --format nv12 \
+ *         --frames 10 \
+ *         --output vdo.out \
+ *         --crop 100,50,320,240 \
+ *         --output-format rgb-planar \
+ *         --pp-device a9-gpu-proc
  */
 
 #include "vdo-error.h"
@@ -63,6 +84,7 @@
 #include <syslog.h>
 
 #include "panic.h"
+#include "preprocess.h"
 
 static gboolean shutdown       = FALSE;
 static const gchar* param_desc = "";
@@ -182,6 +204,11 @@ static int handle_vdo_failed(GError* error) {
  * --format [av1, avif, h264, h265, jpeg, nv12, rgb, y800]
  * --frames [number of frames]
  * --output [output filename]
+ * --width [stream width]
+ * --height [stream height]
+ * --crop [x,y,width,height]
+ * --output-format [rgb-interleaved, rgb-planar, nv12]
+ * --pp-device [cpu-proc, a9-gpu-proc]
  */
 int main(int argc, char* argv[]) {
     g_autoptr(GError) error     = NULL;
@@ -191,6 +218,13 @@ int main(int argc, char* argv[]) {
     gchar* format               = "h264";
     guint frames                = G_MAXUINT;
     gchar* output_file          = "/dev/null";
+    gint width                  = 640;
+    gint height                 = 360;
+    gchar* crop_str             = NULL;
+    gchar* output_format        = NULL;
+    gchar* pp_device            = "cpu-proc";
+    preprocess_crop_t crop      = {0};
+    preprocess_t* pp            = NULL;
     FILE* dest_f                = NULL;
 
     GOptionEntry options[] = {
@@ -203,6 +237,29 @@ int main(int argc, char* argv[]) {
          NULL},
         {"frames", 'n', 0, G_OPTION_ARG_INT, &frames, "number of frames", NULL},
         {"output", 'o', 0, G_OPTION_ARG_FILENAME, &output_file, "output filename", NULL},
+        {"width", 'W', 0, G_OPTION_ARG_INT, &width, "stream width (default 640)", NULL},
+        {"height", 'H', 0, G_OPTION_ARG_INT, &height, "stream height (default 360)", NULL},
+        {"crop",
+         'c',
+         0,
+         G_OPTION_ARG_STRING,
+         &crop_str,
+         "crop region with larod preprocessing",
+         "X,Y,W,H"},
+        {"output-format",
+         'f',
+         0,
+         G_OPTION_ARG_STRING,
+         &output_format,
+         "larod preprocessing output format (rgb-interleaved (default), rgb-planar, nv12)",
+         NULL},
+        {"pp-device",
+         'd',
+         0,
+         G_OPTION_ARG_STRING,
+         &pp_device,
+         "larod preprocessing device (cpu-proc (default), a9-gpu-proc)",
+         NULL},
         {
             NULL,
             0,
@@ -222,6 +279,24 @@ int main(int argc, char* argv[]) {
     if (!g_option_context_parse(context, &argc, &argv, &error))
         panic("%s Failed to use option_context_parse: %s", __func__, error->message);
 
+    if (width <= 0 || height <= 0)
+        panic("%s Invalid resolution %dx%d", __func__, width, height);
+
+    // Preprocessing is used when either crop or output format is given
+    const gchar* pp_input_format = NULL;
+    if (crop_str || output_format) {
+        if (crop_str && !preprocess_parse_crop(crop_str, &crop))
+            panic("%s Invalid crop \"%s\", expected x,y,width,height", __func__, crop_str);
+        if (!output_format)
+            output_format = "rgb-interleaved";
+        if (g_strcmp0(format, "nv12") == 0)
+            pp_input_format = "nv12";
+        else if (g_strcmp0(format, "rgb") == 0)
+            pp_input_format = "rgb-interleaved";
+        else
+            panic("%s Preprocessing requires format nv12 or rgb, not %s", __func__, format);
+    }
+
     dest_f = fopen(output_file, "wb");
     if (!dest_f)
         panic("%s open failed: %m", __func__);
@@ -232,15 +307,14 @@ int main(int argc, char* argv[]) {
     settings = vdo_map_new();
     set_format(settings, format);
 
-    // Set default arguments
     VdoPair32u resolution = {
-        .w = 640,
-        .h = 360,
+        .w = (guint)width,
+        .h = (guint)height,
     };
     vdo_map_set_pair32u(settings, "resolution", resolution);
 
     // Use snapshot API when nbr of frames are 1
-    if (frames == 1) {
+    if (frames == 1 && !pp_input_format) {
         g_autoptr(VdoBuffer) buffer = vdo_stream_snapshot(settings, &error);
         if (!buffer)
             panic("%s: Failed to get snapshot: %s", __func__, error->message);
@@ -274,6 +348,13 @@ int main(int argc, char* argv[]) {
            vdo_map_get_uint32(info, "height", 0),
            (unsigned int)(vdo_map_get_double(info, "framerate", 0.0) + 0.5));
 
+    if (pp_input_format)
+        pp = preprocess_new(info,
+                            pp_input_format,
+                            crop_str ? &crop : NULL,
+                            output_format,
+                            pp_device);
+
     // Start the stream
     if (!vdo_stream_start(stream, &error))
         panic("%s: Failed to start vdo stream : %s", __func__, error->message);
@@ -293,7 +374,12 @@ int main(int argc, char* argv[]) {
         if (!buffer)
             return handle_vdo_failed(error);
 
-        save_frame_to_file(buffer, dest_f);
+        if (pp) {
+            print_frame(vdo_buffer_get_frame(buffer));
+            preprocess_run(pp, buffer, dest_f);
+        } else {
+            save_frame_to_file(buffer, dest_f);
+        }
 
         // Release the buffer and allow the server to reuse it
         if (!vdo_stream_buffer_unref(stream, &buffer, &error)) {
@@ -304,6 +390,8 @@ int main(int argc, char* argv[]) {
     }
 
 exit:
+    preprocess_free(pp);
+
     if (dest_f)
         fclose(dest_f);
 

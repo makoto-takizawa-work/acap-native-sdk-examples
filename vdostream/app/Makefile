@@ -1,9 +1,9 @@
 PROG1	= $(shell jq -r '.acapPackageConf.setup.appName' manifest.json)
-OBJS1	= $(PROG1).c panic.c
+OBJS1	= $(PROG1).c panic.c preprocess.c
 PROGS	= $(PROG1)
 DEBUG_DIR = debug
 
-PKGS = gio-2.0 gio-unix-2.0 vdostream
+PKGS = gio-2.0 gio-unix-2.0 vdostream liblarod
 
 CFLAGS += $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) pkg-config --cflags $(PKGS))
 LDLIBS += $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) pkg-config --libs $(PKGS))

@@ -20,3 +20,5 @@ param.conf
 
 // Ignore files and directories starting with "staging-only"
 **/staging-only*
+
+.env

@@ -33,6 +33,9 @@
  *
  * Finally, the third argument, output, is the output filename.
  *
+ * Optionally, width and height select the requested resolution
+ * (default 640x360).
+ *
  * Suppose that you have done through the steps of installation.
  * Then you would go to /usr/local/packages/vdoencodeclient on your device
  * and then for example run:
@@ -182,6 +185,8 @@ static int handle_vdo_failed(GError* error) {
  * --format [av1, avif, h264, h265, jpeg, nv12, rgb, y800]
  * --frames [number of frames]
  * --output [output filename]
+ * --width  [frame width, default 640]
+ * --height [frame height, default 360]
  */
 int main(int argc, char* argv[]) {
     g_autoptr(GError) error     = NULL;
@@ -191,6 +196,8 @@ int main(int argc, char* argv[]) {
     gchar* format               = "h264";
     guint frames                = G_MAXUINT;
     gchar* output_file          = "/dev/null";
+    gint width                  = 640;
+    gint height                 = 360;
     FILE* dest_f                = NULL;
 
     GOptionEntry options[] = {
@@ -203,6 +210,8 @@ int main(int argc, char* argv[]) {
          NULL},
         {"frames", 'n', 0, G_OPTION_ARG_INT, &frames, "number of frames", NULL},
         {"output", 'o', 0, G_OPTION_ARG_FILENAME, &output_file, "output filename", NULL},
+        {"width", 'W', 0, G_OPTION_ARG_INT, &width, "frame width (default 640)", NULL},
+        {"height", 'H', 0, G_OPTION_ARG_INT, &height, "frame height (default 360)", NULL},
         {
             NULL,
             0,
@@ -222,6 +231,9 @@ int main(int argc, char* argv[]) {
     if (!g_option_context_parse(context, &argc, &argv, &error))
         panic("%s Failed to use option_context_parse: %s", __func__, error->message);
 
+    if (width <= 0 || height <= 0)
+        panic("%s Invalid resolution %dx%d", __func__, width, height);
+
     dest_f = fopen(output_file, "wb");
     if (!dest_f)
         panic("%s open failed: %m", __func__);
@@ -232,10 +244,9 @@ int main(int argc, char* argv[]) {
     settings = vdo_map_new();
     set_format(settings, format);
 
-    // Set default arguments
     VdoPair32u resolution = {
-        .w = 640,
-        .h = 360,
+        .w = (guint32)width,
+        .h = (guint32)height,
     };
     vdo_map_set_pair32u(settings, "resolution", resolution);
 

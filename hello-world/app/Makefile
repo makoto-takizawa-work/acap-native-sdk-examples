@@ -1,5 +1,5 @@
 PROG      = $(shell jq -r '.acapPackageConf.setup.appName' manifest.json)
-SRCS      = main.c
+SRCS      = main.c signal_logger.c
 DEBUG_DIR = debug
 
 PKGS =

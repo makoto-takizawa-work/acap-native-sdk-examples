@@ -17,24 +17,42 @@
 /**
  * - signal_logger -
  *
- * This application writes "Hello World!" to the syslog.
- *
+ * Based on hello_world. Keeps running and writes every signal it receives
+ * (e.g. on stop, restart or upgrade) to the syslog, so the signals the
+ * platform sends can be inspected with the system log.
  */
 
 #include <stdio.h>
 #include <syslog.h>
+#include <unistd.h>
 
-/***** Main function *********************************************************/
+#include "signal_logger.h"
 
-/**
- * brief Main function.
- *
- * This main function writes "Hello World" to the syslog and stdout.
- */
 int main(void) {
     openlog("signal_logger", LOG_PID, LOG_USER);
     syslog(LOG_INFO, "Hello World");
     printf("Hello World\n");
+    fflush(stdout);
+
+    sigset_t set;
+    if (signal_logger_init(&set) != 0) {
+        closelog();
+        return 1;
+    }
+    syslog(LOG_INFO, "Started: pid=%d ppid=%d, waiting for signals", (int)getpid(), (int)getppid());
+
+    for (;;) {
+        int signo = signal_logger_wait(&set);
+        if (signo < 0) {
+            closelog();
+            return 1;
+        }
+        if (signal_logger_is_terminating(signo)) {
+            syslog(LOG_INFO, "Exiting on signal %d", signo);
+            break;
+        }
+    }
+
     closelog();
     return 0;
 }

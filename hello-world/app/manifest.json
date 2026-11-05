@@ -6,7 +6,7 @@
             "vendor": "Axis Communications",
             "vendorId": "0123456ABC",
             "version": "1.0.0",
-            "runMode": "once",
+            "runMode": "respawn",
             "compatibleOsVersions": [
                 {
                     "min": "12",

@@ -5,7 +5,7 @@
             "appName": "signal_logger",
             "vendor": "Axis Communications",
             "vendorId": "0123456ABC",
-            "version": "1.0.0",
+            "version": "1.0.1",
             "runMode": "respawn",
             "compatibleOsVersions": [
                 {

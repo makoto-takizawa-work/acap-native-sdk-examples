@@ -1,17 +1,18 @@
 {
-    "schemaVersion": "2.2.0",
+    "schemaVersion": "2.1.0",
     "acapPackageConf": {
         "setup": {
-            "appName": "hello_world",
+            "appName": "signal_logger",
             "vendor": "Axis Communications",
-            "vendorId": "1234567890",
+            "vendorId": "0123456ABC",
             "version": "1.0.0",
+            "runMode": "once",
             "compatibleOsVersions": [
                 {
-                    "max": "13"
+                    "min": "12",
+                    "max": "12"
                 }
-            ],
-            "runMode": "never"
+            ]
         }
     }
 }

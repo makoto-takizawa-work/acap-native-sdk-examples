@@ -15,12 +15,13 @@
  */
 
 /**
- * - hello_world -
+ * - signal_logger -
  *
  * This application writes "Hello World!" to the syslog.
  *
  */
 
+#include <stdio.h>
 #include <syslog.h>
 
 /***** Main function *********************************************************/
@@ -28,9 +29,12 @@
 /**
  * brief Main function.
  *
- * This main function writes "hello_world" to the syslog.
+ * This main function writes "Hello World" to the syslog and stdout.
  */
 int main(void) {
-    /* Choose between { LOG_INFO, LOG_CRIT, LOG_WARNING, LOG_ERR }*/
-    syslog(LOG_INFO, "Hello World!");
+    openlog("signal_logger", LOG_PID, LOG_USER);
+    syslog(LOG_INFO, "Hello World");
+    printf("Hello World\n");
+    closelog();
+    return 0;
 }
